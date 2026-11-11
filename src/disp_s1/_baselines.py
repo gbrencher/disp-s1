@@ -1,13 +1,32 @@
+from datetime import timedelta
+
 import isce3
 import numpy as np
 from dolphin import baseline
 from dolphin._types import Filename
 from numpy.typing import ArrayLike
 from opera_utils import (
-    get_cslc_orbit,
     get_radar_wavelength,
 )
+from opera_utils._cslc import get_s1_orbit
 from pyproj import CRS, Transformer
+
+
+def get_cslc_orbit(h5file: Filename):
+    """Read an S1 orbit without requiring an official product filename.
+
+    DISP-S1 accepts compressed CSLCs whose names are not recognized by the
+    generic opera-utils sensor dispatcher. Keep its state-vector conversion,
+    selecting the S1 metadata reader explicitly for this S1-only workflow.
+    Missing or invalid orbit metadata raises the reader's original exception.
+    """
+    times, positions, velocities, reference_epoch = get_s1_orbit(h5file)
+    return isce3.core.Orbit([
+        isce3.core.StateVector(
+            isce3.core.DateTime(reference_epoch + timedelta(seconds=t)), x, v
+        )
+        for t, x, v in zip(times, positions, velocities)
+    ])
 
 
 def _get_grids(x: ArrayLike, y: ArrayLike, epsg: int) -> tuple:

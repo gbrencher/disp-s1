@@ -15,7 +15,7 @@ from dolphin import PathOrStr, io, stitching
 from dolphin._log import log_runtime, setup_logging
 from dolphin.unwrap._utils import create_combined_mask
 from dolphin.utils import DummyProcessPoolExecutor, full_suffix, get_max_memory_usage
-from dolphin.workflows.config import DisplacementWorkflow
+from dolphin.workflows.config import CorrectionOptions, DisplacementWorkflow
 from dolphin.workflows.corrections import run as run_corrections
 from dolphin.workflows.displacement import OutputPaths
 from dolphin.workflows.displacement import run as run_displacement
@@ -240,6 +240,9 @@ def create_products(
     cfg: DisplacementWorkflow,
     pge_runconfig: RunConfig,
     processing_start_datetime: datetime | None = None,
+    *,
+    correction_options: CorrectionOptions | None = None,
+    product_metadata: product.ProductMetadata | None = None,
 ):
     """Create NetCDF products from the outputs of dolphin's displacement workflow.
 
@@ -253,9 +256,20 @@ def create_products(
         PGE-specific metadata for the output product.
     processing_start_datetime : datetime.datetime, optional
         The processing start datetime. If not provided, datetime.now() is used.
-
+    correction_options : CorrectionOptions, optional
+        Explicit correction configuration. When omitted, use the legacy
+        ``cfg.correction_options`` attribute. Required when the workflow does
+        not carry that attribute. An explicit argument takes precedence.
+    product_metadata : product.ProductMetadata, optional
+        Per-call metadata customization; omitted for official OPERA defaults.
 
     """
+    if correction_options is None:
+        correction_options = getattr(cfg, "correction_options", None)
+    if correction_options is None:
+        raise ValueError(
+            "Pass correction_options explicitly when cfg has no correction_options"
+        )
     if processing_start_datetime is None:
         processing_start_datetime = datetime.now(timezone.utc)
     # Read the reference point
@@ -354,9 +368,9 @@ def create_products(
             )
 
     # Get the incidence angles for /identification metadata
-    if len(cfg.correction_options.geometry_files) > 0:
+    if len(correction_options.geometry_files) > 0:
         near_far_incidence_angles = _get_near_far_incidence_angles(
-            cfg.correction_options.geometry_files
+            correction_options.geometry_files
         )
     else:
         logger.warning("Using approximate incidence angles")
@@ -382,6 +396,7 @@ def create_products(
         near_far_incidence_angles=near_far_incidence_angles,
         water_mask=matching_water_binary_mask,
         max_workers=algorithm_parameters.num_parallel_products,
+        product_metadata=product_metadata,
     )
     logger.info("Finished creating output products.")
 
@@ -823,6 +838,7 @@ def process_product(
     los_east_file: Path | None = None,
     los_north_file: Path | None = None,
     near_far_incidence_angles: tuple[float, float] = (30.0, 45.0),
+    product_metadata: product.ProductMetadata | None = None,
 ) -> Path:
     """Create a single displacement product.
 
@@ -903,6 +919,7 @@ def process_product(
         corrections=corrections,
         reference_point=reference_point,
         processing_start_datetime=processing_start_datetime,
+        product_metadata=product_metadata,
     )
 
     return output_path
@@ -921,6 +938,7 @@ def create_displacement_products(
     near_far_incidence_angles: tuple[float, float] = (30.0, 45.0),
     water_mask: Path | None = None,
     max_workers: int = 3,
+    product_metadata: product.ProductMetadata | None = None,
 ) -> None:
     """Run parallel processing for all interferograms.
 
@@ -1006,6 +1024,7 @@ def create_displacement_products(
                 repeat(los_east_file),
                 repeat(los_north_file),
                 repeat(near_far_incidence_angles),
+                repeat(product_metadata),
             )
         )
 

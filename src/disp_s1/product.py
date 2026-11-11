@@ -5,8 +5,10 @@ from __future__ import annotations
 import datetime
 import logging
 import subprocess
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ProcessPoolExecutor
+from copy import deepcopy
+from dataclasses import dataclass
 from io import StringIO
 from multiprocessing import get_context
 from pathlib import Path
@@ -82,6 +84,24 @@ COMPRESSED_SLC_TEMPLATE = "compressed_{burst_id}_{date_str}.h5"
 TIME_ARRAY_REFERENCE = datetime.datetime(2010, 1, 1, 0, 0, 0)
 
 
+@dataclass(frozen=True)
+class ProductMetadata:
+    """Per-call metadata extension points; numerical processing is unchanged.
+
+    ``global_attributes`` replaces the default global attributes in full.
+    ``write_identification`` receives the keyword arguments of
+    ``_create_identification_group``. ``write_metadata`` receives
+    ``output_name``, ``pge_runconfig`` and ``dolphin_config`` as keywords.
+    Callbacks create their respective HDF5 groups. When this object is omitted,
+    official OPERA metadata writers and global attributes are used unchanged.
+    For parallel product writing, callbacks must be pickleable.
+    """
+
+    global_attributes: Mapping[str, Any]
+    write_identification: Callable[..., None]
+    write_metadata: Callable[..., None]
+
+
 def create_output_product(
     output_name: Filename,
     unw_filename: Filename,
@@ -103,6 +123,8 @@ def create_output_product(
     near_far_incidence_angles: tuple[float, float] = (30.0, 45.0),
     reference_point: ReferencePoint | None = None,
     corrections: Optional[dict[str, ArrayLike]] = None,
+    *,
+    product_metadata: ProductMetadata | None = None,
 ):
     """Create the OPERA output product in NetCDF format.
 
@@ -153,8 +175,18 @@ def create_output_product(
         If None, will record empty in the dataset's attributes
     corrections : dict[str, ArrayLike], optional
         A dictionary of corrections to write to the output file, by default None
+    product_metadata : ProductMetadata, optional
+        Custom product identity and metadata writers. Omit for official defaults.
 
     """
+    # Product attributes are updated below; keep concurrent/sequential calls isolated.
+    product_definitions = deepcopy(DISPLACEMENT_PRODUCTS)
+    identification_writer = (
+        product_metadata.write_identification if product_metadata else _create_identification_group
+    )
+    metadata_writer = (
+        product_metadata.write_metadata if product_metadata else _create_metadata_group
+    )
     if corrections is None:
         corrections = {}
     algorithm_parameters = AlgorithmParameters.from_yaml(
@@ -287,7 +319,7 @@ def create_output_product(
     recommended_mask = np.logical_not(bad_pixel_mask)
     del temporal_coherence, conncomps, similarity
     # Add the current threshold to the product attributes
-    DISPLACEMENT_PRODUCTS.recommended_mask.attrs |= {
+    product_definitions.recommended_mask.attrs |= {
         "similarity_threshold": str(
             algorithm_parameters.recommended_similarity_threshold
         ),
@@ -306,7 +338,7 @@ def create_output_product(
         wavelength_cutoff=wavelength_cutoff,
         pixel_spacing=pixel_spacing,
     ).astype(np.float32)
-    DISPLACEMENT_PRODUCTS.short_wavelength_displacement.attrs |= {
+    product_definitions.short_wavelength_displacement.attrs |= {
         "wavelength_cutoff": str(wavelength_cutoff),
         "wavelength_cutoff_units": "meters",
     }
@@ -316,10 +348,10 @@ def create_output_product(
     # Be more aggressive with the short wavelength displacement mask:
     filtered_disp_arr[bad_pixel_mask] = np.nan
 
-    product_infos: list[ProductInfo] = list(DISPLACEMENT_PRODUCTS)
+    product_infos: list[ProductInfo] = list(product_definitions)
 
     with h5netcdf.File(output_name, "w", **FILE_OPTS) as f:
-        f.attrs.update(GLOBAL_ATTRS)
+        f.attrs.update(product_metadata.global_attributes if product_metadata else GLOBAL_ATTRS)
         _create_grid_mapping(group=f, crs=crs, gt=gt)
 
         _create_yx_dsets(group=f, gt=gt, shape=shape, include_time=True)
@@ -434,7 +466,7 @@ def create_output_product(
 
     reference_orbit_type = _get_orbit_type(reference_cslc_files[0])
     secondary_orbit_type = _get_orbit_type(secondary_cslc_files[0])
-    _create_identification_group(
+    identification_writer(
         output_name=output_name,
         pge_runconfig=pge_runconfig,
         radar_wavelength=radar_wavelength,
@@ -452,7 +484,7 @@ def create_output_product(
         processing_start_datetime=processing_start_datetime,
     )
 
-    _create_metadata_group(
+    metadata_writer(
         output_name=output_name,
         pge_runconfig=pge_runconfig,
         dolphin_config=dolphin_config,
